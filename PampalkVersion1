@@ -1,0 +1,196 @@
+%% Howtoclipmusic
+
+%function wav = howtoclipmusic(filename)
+ filename = 'superhero.wav'
+    max_dB = 96;
+    [siz fs] = wavread(filename,'size'); %% use max (center) 2min
+    if fs~=22050,
+        error([filename,': fs~=22050 (',num2str(fs),')'])
+    end
+    if siz(1) > fs*120,
+        x0 = ceil(siz(1)/2 - fs*60);
+        x1 = floor(siz(1)/2 + fs*60);
+else
+x0 = 1;
+        x1 = siz(1);
+    end
+    %wavread returns values in the range -1 to 1
+    wav = wavread(filename,[x0 x1]) * (10^(max_dB/20));
+%end howtoclipmusic
+
+%% Power Spectrum 2.1 variables are initialized and memory is allocated:
+seg_size = 512; %3ms if fs == 22050Hz
+hop_size = 256;
+num_segments = floor((length(wav)-seg_size)/hop_size)+1;
+P = zeros(seg_size/2+1,num_segments); %allocate memory 
+M = zeros(num_filt,num_segments);
+% hann window function, alternative: w = hann(seg_size) 
+w = 0.5*(1-cos(2*pi*(0:seg_size-1)/(seg_size-1)))';
+
+
+%% 2.2 in the main loop, for each frame the FFT is computed:
+for i = 1:num_segments,
+    idx = (1:seg_size)+(i-1)*hop_size;
+    x = abs(fft(wav(idx).*w)/sum(w)*2).^2;
+    P(:,i) = x(1:end/2+1);  
+end
+M(:,i) = mel_filter * P(:,i);
+
+%% 2.4 The triangular filters can be computed in Matlab as follows.
+%First, the variables are initialized and memory allocated.
+num_filt = 36; %number of Mel frequency bands
+f = linspace(0,fs/2,seg_size/2+1); %frequency bins of P
+mel = log(1+f/700)*1127.01048;
+mel_idx = linspace(0,mel(end),num_filt+2);
+mel_filter = zeros(num_filt,seg_size/2+1);
+
+f_idx = zeros(num_filt+2,1);
+for i=1:num_filt+2,
+   [tmp f_idx(i)] = min(abs(mel - mel_idx(i)));
+end
+freqs = f(f_idx);
+
+%height of triangles
+h = 2./(freqs(3:num_filt+2)-freqs(1:num_filt));
+
+%% 2.5 in the main loop for each triangular filter the weights are computed
+for i=1:num_filt,
+    mel_filter(i,:) = ...
+    (f > freqs(i) & f <= freqs(i+1)).* ...
+    h(i).*(f-freqs(i))/(freqs(i+1)-freqs(i)) + ...
+    (f > freqs(i+1) & f < freqs(i+2)).* ...
+    h(i).*(freqs(i+2)-f)/(freqs(i+2)-freqs(i+1));
+end
+ 
+%% 2.7 Decibel Conversion
+ 
+M(M<1) = 1;
+M_dB = 10*log10(M);
+
+%% 2.8 DCT matrix Computation
+num_coeffs = 20;
+DCT = 1/sqrt(num_filt/2) * ...
+    cos((0:num_coeffs-1)'*(0.5:num_filt)*pi/num_filt);
+DCT(1,:) = DCT(1,:)*sqrt(2)/2;
+ 
+%% 2.9 DCT applied to Mel power spectrum
+mfcc = DCT * M_dB;
+
+%% 2.10 Reconstructed Mel Power spectrum
+M_dB_rec = DCT' * mfcc;
+
+%% 2.18 Gaussian representation of a piece
+m = mean(mfcc,2); % center
+co = cov(mfcc'); % covariance
+ico = inv(co); % inverse covariance
+
+%% 2.19 Symmetric Kullback-Leibler divergence between 2 Gaussians
+d = trace(co1*ico2) + trace(co2*ico1) + ...
+    trace((ico1+ico2)*(m1-m2)*(m1-m2)');
+
+%% 2.20 Rescaled distance
+fact=450; %gave best results as rescaling factor
+d = -exp(-1/fact*d)
+
+%% 2.21 FP matrix generation
+t = zeros(1,36);
+t(1) =1;t(7:8)=5;t(15:18)= 9;
+t(2)   = 2; t( 9:10) = 6; t(19:23) = 10;
+t(3:4) = 3; t(11:12) = 7; t(24:29) = 11;
+t(5:6) = 4; t(13:14) = 8; t(30:36) = 12;
+
+mel2 = zeros(12,size(M_dB,2));
+for i=1:12,
+    mel2(i,:) = sum(M_dB(t==i,:),1);
+end
+
+%% 2.22 Constants
+% For fluctuation strength weights (flux), filter which smoothes over the
+% frequency bands (filt1), and the filter which smoothes over the
+% modulation frequencies (filt2)
+f = linspace(0,22050/512/2,64+1);
+flux = repmat(1./(f(2:32)/4+4./f(2:32)),12,1);
+w = [0.05, 0.1, 0.25, 0.5, 1, 0.5, 0.25, 0.1, 0.05];
+filt1 = filter2(w,eye(12)); % 12x12
+filt1 = filt1./repmat(sum(filt1,2),1,12);
+filt2 = filter2(w,eye(30)); % 30x30
+filt2 = (filt2./repmat(sum(filt2,2),1,30))';
+
+%% 2.23 For songs <15s Pad them
+if size(mel2,2)<128, % pad with zeros
+    mel2 = [zeros(12,ceil(128-size(mel2,2))),mel2];
+end
+
+%% 2.24 Main part of FP calculation
+num_segments = floor((size(mel2,2)-128)/64+1);
+fp_all = zeros(num_segments,12*30);
+for i=1:num_segments,
+    X = fft(mel2(:,(1:128)+64*(i-1)),128,2);
+    X2 = abs(X(:,2:32)).*flux; % amplitude spectrum
+    X2 = filt1*abs(diff(X2,1,2))*filt2;
+    fp_all(i,:) = X2(:)';
+end
+
+%% 2.25 Summary of song (2 min piece with 50% overlap)
+fp = median(fp_all);
+
+%% 2.26 Compare 2 piece with Euclidean Distance Computation
+d = sqrt(sum((fp1-fp2).^2)); % or: d = norm(fp1-fp2);
+
+%% 2.27 Time Domain feature- ZCR per sec
+%fs is sampling frequency
+zcr = sum(abs(diff(sign(wav))))/2/length(wav)*fs;
+
+%% 2.28 Time Domain feature- RMS energy - aka loudness perception
+rms = sqrt(mean(wav.^2));
+
+%% 2.29 Power Spectrum Feature - Noisiness
+P_dB = P;
+P_dB(P_dB<1) = 1;
+P_dB = 10*log10(P_dB);
+P_dB_new = zeros(size(P_dB,1)-10,floor(size(P_dB,2)/10));
+for j=1:floor(size(P_dB,2)/10),
+    P_dB_new(:,j) = ...
+        mean(P_dB(11:end,(1:10)+(j-1)*10),2);
+end
+noisiness = sum(sum(abs(diff(P_dB_new))));
+
+%% 2.30 Mel Power Spectrum Feature - Average loudness
+avg_loudness = mean(M_dB(:));
+
+%% 2.31 Mel Power Spectrum Feature - Percussiveness
+percussiveness = mean(abs(diff(M_dB,1,2)))
+
+%% 2.32 Mel Power Spectrum Feature - Spectral Centroid
+spectral_centroid = ...
+    sum((1:num_filt).*sum(M_dB,2)'./max(sum(M_dB(:)),eps));
+
+%% 2.33 Fluctuation Pattern Feature - Fluctuation Strength
+fp_max = max(FP(:));
+
+%% 2.34 Fluctutation Pattern Feature - Sum
+fp_sum = sum(FP(:));
+
+%% 2.35 Fluctuation Pattern Feature - Bass
+fp_bass = sum(sum(FP(1:2,3:30)));
+
+%% 2.36 Fluctuation Pattern Feature - Agressiveness
+fp_aggr = sum(sum(FP(2:end,1:4)))/max(max(FP(:)),eps);
+
+%% 2.37 Fluctuation Pattern Feature - Domination of low frequencies
+fp_DLF = sum(sum(FP(1:3,:)))/max(sum(sum(FP(9:12,:))),eps);
+
+%% 2.38 Fluctuation Pattern Feature - (Center of) Gravity
+fpg = sum(sum(FP).*(1:30))/max(sum(FP(:)),eps);
+
+%% 2.40 Fluctuation Pattern Feature - Focus
+fpf = mean(FP(:)./max(max(FP(:)),eps));
+
+%% 2.42 Best Linear Combination of Features
+%d = 0.7 (- exp(-dG1/450) + 0.7950) /0.1493 +...
+ %   0.1 (dFP - 1688.4) /878.23 +...
+  %  0.1 (dFPG - 1.2745) /1.1245 +...
+   % 0.1 (dFPB - 1064.8) /932.79
+    
+
+
